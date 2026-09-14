@@ -1,0 +1,55 @@
+# 주간 브리프 생성 (설계 §14, §19, tasks §16.2 — 2026-08 격주→주간 전환)
+# cron은 매일 실행하되, 스크립트가 주차(월~일) 완결 여부를 판단해
+# 아직이면 즉시 종료한다 — 주 1회 cron이면 기간 종료 후 최대 6일
+# 발행이 밀리는 문제가 있어 매일 확인으로 변경 (외부 리뷰 P1-6).
+# 00:17 UTC = 09:17 KST
+name: generate-brief
+
+on:
+  schedule:
+    - cron: "17 0 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "기간 판정을 무시하고 강제 생성"
+        type: boolean
+        default: false
+      # 특정 주차 생성·재생성 (관리 화면 '이 주차 다시 생성' / '특정 주차 생성').
+      # 지정하면 force와 같이 기발행이어도 새 버전을 만든다. 월요일이 아니면
+      # 스크립트가 그 주 월요일로 보정하고, 미완결·미래 주차는 거부한다.
+      # REST API(dispatches)로는 모든 input이 문자열로 오므로 force도 "true"로 보낸다.
+      week_start:
+        description: "특정 주차의 월요일 (YYYY-MM-DD, 비우면 직전 완결 주차)"
+        type: string
+        required: false
+        default: ""
+
+concurrency:
+  group: generate-brief
+  cancel-in-progress: false
+
+jobs:
+  generate-brief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      BRIEF_FORCE: ${{ inputs.force }}
+      BRIEF_WEEK_START: ${{ inputs.week_start }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install dependencies
+        working-directory: scripts
+        run: pip install --quiet -r requirements.txt
+
+      - name: Generate weekly brief
+        working-directory: scripts
+        run: python -m kiro_batch.generate_brief

@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+:root {
+  --background: #fafafa;
+  --foreground: #1a1a1a;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #101012;
+    --foreground: #ececec;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  /* 한국어 가독성: 시스템 한글 폰트 우선 + 넉넉한 행간 */
+  font-family:
+    "Pretendard Variable", Pretendard, "Apple SD Gothic Neo",
+    "Malgun Gothic", "Noto Sans KR", system-ui, -apple-system, sans-serif;
+  line-height: 1.65;
+  letter-spacing: -0.01em;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3 {
+  letter-spacing: -0.02em;
+  word-break: keep-all;
+}

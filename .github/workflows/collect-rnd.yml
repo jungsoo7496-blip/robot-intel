@@ -1,0 +1,38 @@
+# NTIS R&D 공고 수집 (외부 리뷰 P1-1로 뉴스 collect에서 분리)
+# - AI 호출 없음, 실측 ~20초 — 뉴스 수집이 지연·실패해도 굶지 않는다
+# - 공고는 하루 단위로 갱신되므로 3회면 충분 (KST 07:05 / 12:05 / 18:05)
+name: collect-rnd
+
+on:
+  schedule:
+    # 2026-08-11: 3회 → 1회 (Actions 예산). NTIS 공고는 하루 단위로 갱신되고
+    # 마감 임박 표시는 열람 시점에 재계산하므로 조간 전 1회면 충분하다.
+    - cron: "5 21 * * *" # KST 06:05
+  workflow_dispatch:
+
+concurrency:
+  group: collect-rnd
+  cancel-in-progress: false
+
+jobs:
+  collect-rnd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install dependencies
+        working-directory: scripts
+        run: pip install --quiet -r requirements.txt
+
+      - name: Collect R&D announcements
+        working-directory: scripts
+        run: python -m kiro_batch.collect_rnd

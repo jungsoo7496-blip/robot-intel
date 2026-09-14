@@ -1,0 +1,72 @@
+# 정책·동향 보고서 수집 + Gemini 배치 분석 (보고서 스펙 §33)
+# - 수집(AI 없음)과 분석(Flash 일 6콜 예산)을 한 워크플로에서 순차 실행
+# - 하루 1회 KST 06:35 (조간 열람 전) — Actions 예산 절약 (2026-08-09,
+#   2회→1회: 정부 발간물은 하루 단위 갱신이라 충분, 분석 6콜 일괄)
+name: collect-reports
+
+on:
+  schedule:
+    - cron: "35 21 * * *"
+  workflow_dispatch:
+    inputs:
+      max_calls:
+        description: "이번 실행 Gemini 최대 콜 수 (비우면 남은 일일 예산)"
+        required: false
+        default: ""
+
+concurrency:
+  group: collect-reports
+  cancel-in-progress: false
+
+jobs:
+  collect-reports:
+    runs-on: ubuntu-latest
+    # 실행 단위가 '채널'에서 '(채널 × 검색어) 조합'으로 바뀌어 12 → 15분
+    # (Actions는 point 제외라 36조합 ≈ 7분. 수집 자체는 480초 예산이 멈춘다)
+    timeout-minutes: 15
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      PRISM_API_KEY: ${{ secrets.PRISM_API_KEY }}
+      DATA_GO_KR_API_KEY: ${{ secrets.DATA_GO_KR_API_KEY }}  # 국회도서관 자료검색 (2026-08-25 승인 키)
+      NANET_DETAIL_API_KEY: ${{ secrets.NANET_DETAIL_API_KEY }}  # 국회도서관 상세정보 (구 계정 키 — 검색 키와 별개)
+      NKIS_API_KEY: ${{ secrets.NKIS_API_KEY }}  # 2026-08-19 수신
+      # ScienceON (2026-08-17 연결 — 토큰은 인증키+클라이언트ID+등록 MAC 3요소)
+      SCIENCEON_AUTH_KEY: ${{ secrets.SCIENCEON_AUTH_KEY }}
+      SCIENCEON_CLIENT_ID: ${{ secrets.SCIENCEON_CLIENT_ID }}
+      SCIENCEON_MAC_ADDRESS: ${{ secrets.SCIENCEON_MAC_ADDRESS }}
+      # 국내 리전 경유 (2026-08-19): 일부 국내 공공 사이트는 Vercel icn1 경유
+      REPORT_RELAY_URL: https://robotreport.vercel.app/api/relay
+      REPORT_RELAY_TOKEN: ${{ secrets.REPORT_RELAY_TOKEN }}
+      REPORT_AI_MAX_CALLS_PER_RUN: ${{ inputs.max_calls || '12' }}
+      # 적체 소화 가속 (2026-08-28): Flash 503 지속 시 예비 Lite로 전환하므로
+      # Lite 쿼터(여유 큼) 기준 12콜×4건 = 48건/실행
+      REPORT_AI_DAILY_CALL_LIMIT: "12" 
+      # POINT는 데이터센터 IP 전면 차단 — Actions에서는 생략, 사무실 PC 주간
+      # 예약 실행이 수집 담당 (2026-08-25)
+      REPORT_SKIP_SOURCES: point
+      # 검색어를 채널마다 적지 않고 목록 하나로 모으면서 실행 단위가
+      # (채널 × 검색어) 조합이 됐다 (2026-09-08). 상한만으로는 조합별 소요가
+      # 달라 timeout을 넘길 수 있어 시간 예산을 함께 둔다.
+      REPORT_MAX_TASKS_PER_RUN: "40"
+      REPORT_FETCH_BUDGET_SECONDS: "480"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install dependencies
+        working-directory: scripts
+        run: pip install --quiet -r requirements.txt
+
+      - name: Collect policy reports
+        working-directory: scripts
+        run: python -m kiro_batch.collect_reports
+
+      - name: Analyze reports (Gemini batch)
+        working-directory: scripts
+        run: python -m kiro_batch.analyze_reports

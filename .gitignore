@@ -1,0 +1,60 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.*
+
+# next.js
+.next/
+out/
+build/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# local db / backups
+*.sqlite
+*.sqlite3
+*.db
+backup*.sql
+backup*.sql.gz
+backups/
+
+# logs / misc
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# test coverage
+coverage/
+.coverage
+htmlcov/
+
+# editor
+.idea/
+.vscode/
+
+# claude local settings
+.claude/settings.local.json
+# 작업용 저장소 사본. 그 안에 실제 운영 .env 사본이 들어 있어 절대 커밋되면 안 된다.
+# 지금까지는 .git/info/exclude(내 PC에만 있는 파일)로만 막혀 있었다 — 저장소를
+# 다른 곳으로 복사하면 그 보호가 따라가지 않으므로 여기에 못박는다 (2026-09-09).
+.claude/worktrees/
+
+# Vercel CLI ��ũ ��Ÿ������
+.vercel/

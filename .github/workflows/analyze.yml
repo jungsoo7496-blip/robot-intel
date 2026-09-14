@@ -1,0 +1,91 @@
+# 분석 배치 (외부 리뷰 P0-2로 collect-and-analyze에서 분리)
+# - 잠금 복구 + 분석 큐 처리만 수행 — 수집이 오래 걸려도 굶지 않는다
+# - 하루 4슬롯, 슬롯마다 시간 예산이 다르다 (아래 env·freshness.py 참고)
+name: analyze
+
+on:
+  schedule:
+    # 2026-08-11 재배치 — 실측 기반 3가지 수정:
+    # ① UTC 00시대(KST 09시대) 크론이 3일 연속 드롭됐다(GitHub 혼잡 시간).
+    #    독자 열람 시간대가 통째로 비었으므로 그 슬롯을 폐기한다.
+    # ② 크론 지연이 +13~95분이라 목표 시각보다 40분 앞당겨 건다.
+    # ③ 08:00 판갈이 전 슬롯을 2개 확보(단일 장애점 제거) — 앞 배치가
+    #    드롭·지연돼도 뒤 배치가 조간을 채운다.
+    # KST 05:10 / 07:05 / 15:05(막차) / 22:50
+    #
+    # 2026-08-15 (사용자 결정): 10:10 슬롯 폐지 — 실측 착지가 12:27~12:30
+    # (+139분, UTC 01:10의 고정 지연)이라 오전 독자 열람창을 이미 지나서
+    # 뜬다. 남은 4개 슬롯 처리 능력(~527건/일)이 유입(평균 470건/일)을 넘는다.
+    #
+    # 04:30 수집 폐지와 짝: 밤새 발행분이 06:20 수집(07:06 착지)으로 한꺼번에
+    # 들어오므로 무게중심이 05:10 → 07:05로 옮겨간다. 아래 env에서 크론별로
+    # 시간 예산을 다르게 준다 (05:10은 360초, 07:05는 720초).
+    - cron: "10 20 * * *"
+    - cron: "5 22 * * *"
+    - cron: "5 6 * * *"
+    - cron: "50 13 * * *"
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "분석 모델 (비우면 기본 — 운영 화면 강제 분석 버튼용)"
+        required: false
+        default: ""
+      max_count:
+        description: "이번 실행 최대 분석 건수 (비우면 시간 예산이 허락하는 만큼)"
+        required: false
+        default: ""
+
+concurrency:
+  group: analyze
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    # 가장 긴 슬롯(07:05, 720초) + 배치가 마지막 건을 마저 처리하는 초과분
+    # (~1분) + checkout·pip 오버헤드(~1.5분)에 여유를 둔다.
+    # 과금은 실사용 시간 기준이므로 timeout 여유는 비용에 영향 없다.
+    timeout-minutes: 16
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      # 수동 실행 시 override (빈 값이면 config 기본값 — from_env가 무시.
+      # 정기(schedule) 실행은 inputs가 비어 있어 기본 유지)
+      #
+      # 2026-09-08: max_count 기본값을 "100" → 빈 값으로 바꿨다. 운영자가
+      # 화면에서 누르는 낮 시간대의 예산은 360~540초 = 실측 속도(분당
+      # 18~22건)로 약 110~199건이라, 100건 기본값이 시간 예산보다 먼저
+      # 걸려 강제 분석의 처리량을 아무도 모르게 깎고 있었다.
+      # 값이 들어오는 건 운영자가 건수를 직접 적었을 때뿐이고, 그 숫자는
+      # '상한'으로만 쓰인다 — 건수 캡 하한(analyze.runaway_cap_floor)은
+      # 비켜서고, 막차 소진은 시간 예산만 늘리고 캡은 적어 준 값 그대로
+      # 둔다 (2026-09-08 결함 D 수정 — 예전엔 건수를 적으면 막차 소진이
+      # 통째로 꺼져 KST 14~17시 예산이 540 → 420초로 줄었다).
+      ARTICLE_MODEL: ${{ inputs.model }}
+      ARTICLE_BATCH_MAX_COUNT: ${{ inputs.max_count }}
+      # 크론별 시간 예산 (2026-08-15, 사용자 결정 — 04:30 수집 폐지의 짝):
+      # 05:10(10 20)은 22:50이 처리하고 남긴 이월분만 다루므로 360초면 되고
+      # (큐가 비면 어차피 일찍 끝나 과금도 준다), 07:05(5 22)는 밤새 발행분
+      # 전체를 혼자 받으므로 720초를 준다. 나머지 슬롯·수동 실행은 빈 값 —
+      # freshness.batch_budget_seconds의 시간대별 폴백이 적용된다.
+      ARTICLE_BATCH_MAX_SECONDS: >-
+        ${{ github.event.schedule == '10 20 * * *' && '360'
+         || github.event.schedule == '5 22 * * *' && '720'
+         || '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install dependencies
+        working-directory: scripts
+        run: pip install --quiet -r requirements.txt
+
+      # 잠금 복구는 analyze 시작 시 내부에서 수행된다 (설계 §9.3)
+      - name: Process analysis queue
+        working-directory: scripts
+        run: python -m kiro_batch.analyze

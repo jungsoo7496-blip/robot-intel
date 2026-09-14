@@ -1,0 +1,52 @@
+# 일일 정리 (설계 §19, tasks §16.5 → 2026-09-08 데이터 관리)
+# - 보존 정책(app_settings, /admin/data에서 편집)대로 복제 컬럼·EXCLUDE·비대표
+#   본문 비우기, 오래된 추출·분석 대기 만료, 90일 지난 만료 행 삭제, 실행 기록 정리
+# - 운영 화면의 정리 버튼은 workflow_dispatch + tasks 입력으로 일회성 작업을 넘긴다
+#   (null_raw_text_all, null_raw_response, expire_extract_backlog, cancel_stale_jobs)
+# 잠금 복구는 여기가 아니라 매 분석 배치 시작 시 수행한다 (설계 §9.3).
+# VACUUM FULL은 여기서 하지 않는다 (실행 시간·테이블 잠금) — scripts/db_vacuum_full.bat
+name: cleanup
+
+on:
+  schedule:
+    # 매일 18:47 UTC = 03:47 KST — 밤 배치(22:50 분석)가 끝났고 새벽 배치
+    # (05:10 분석·06:20 수집)가 시작되기 전. 주 1회(월요일)에서 매일로 바꿈:
+    # 하루 +8 MB 증가를 그날 안에 되돌려야 500 MB 한도 전에 멈출 수 있다.
+    - cron: "47 18 * * *"
+  workflow_dispatch:
+    inputs:
+      tasks:
+        description: "일회성 작업 쉼표 목록 (null_raw_text_all, null_raw_response, expire_extract_backlog, cancel_stale_jobs) — 비우면 일일 정리만"
+        required: false
+        default: ""
+
+concurrency:
+  group: cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    # 배치 UPDATE 2,000행 단위라 일일 정리는 1~2분. 일회성 전량 정리도
+    # 10만 행 기준 수 분이면 끝난다. 넘기면 다음 실행이 이어서 한다 (멱등).
+    timeout-minutes: 10
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      # 정기(schedule) 실행은 inputs가 비어 있어 일일 정리만 돈다
+      CLEANUP_TASKS: ${{ inputs.tasks }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install dependencies
+        working-directory: scripts
+        run: pip install --quiet -r requirements.txt
+
+      - name: Run cleanup
+        working-directory: scripts
+        run: python -m kiro_batch.cleanup
