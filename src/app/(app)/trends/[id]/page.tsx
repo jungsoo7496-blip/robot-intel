@@ -60,11 +60,14 @@ export default async function TrendDetailPage({
   const { id } = await params;
   const detail = await getItemDetail(id);
   if (!detail) notFound();
-  const { item, analysis, policy } = detail;
+  const { item, analysis, policy, fromVault, vaultError } = detail;
 
-  const relatedSources = await getRelatedSources(item.cluster_id);
+  const relatedSources = await getRelatedSources(item);
   const representative = relatedSources.find((s) => s.isRepresentative);
   const others = relatedSources.filter((s) => !s.isRepresentative);
+
+  // 분석이 없으면(금고 읽기 실패) 카드가 가진 요약으로 대신한다
+  const summary = analysis?.one_line_summary ?? item.one_line_summary;
 
   const facts: string[] = Array.isArray(analysis?.verified_facts)
     ? analysis.verified_facts
@@ -107,12 +110,29 @@ export default async function TrendDetailPage({
           중요도 {item.importance} · 근거 {item.evidence_level} · KIRO 관련성{" "}
           {item.kiro_relevance}
         </p>
-        {analysis?.one_line_summary && (
-          <p className="mt-3 text-[17px] leading-relaxed">
-            {analysis.one_line_summary}
+        {/* 오래된 기사는 부속이 보관 파일(금고)로 옮겨졌다 — 읽은 곳을 한 줄로 */}
+        {fromVault && !vaultError && (
+          <p className="mt-1 text-xs text-black/40 dark:text-white/40">
+            <Badge>보관 파일에서 읽음</Badge>
           </p>
         )}
+        {summary && (
+          <p className="mt-3 text-[17px] leading-relaxed">{summary}</p>
+        )}
       </div>
+
+      {vaultError && (
+        <div
+          role="status"
+          className="rounded-xl border border-amber-300/70 bg-amber-50/60 px-4 py-3 text-sm dark:border-amber-700/50 dark:bg-amber-950/30"
+        >
+          분석 내용을 불러오지 못했습니다. 제목·요약·원문 링크만 표시합니다.{" "}
+          {/* 영구 실패(색인 없음·id 불일치·손상)는 기다려도 안 바뀐다 — 운영자가 봐야 한다 */}
+          {vaultError.permanent
+            ? "보관 파일에서 이 기사를 찾을 수 없습니다. 운영자에게 알려 주세요."
+            : "일시적인 문제입니다. 잠시 후 다시 시도해 주세요."}
+        </div>
+      )}
 
       {/* 표시 순서: AI 해석 → 사실 → KIRO 시사점 → 수치·일정 → 한계 (사용자 지정) */}
       {analysis?.ai_interpretation && (
@@ -227,7 +247,7 @@ export default async function TrendDetailPage({
       )}
 
       <Section title="출처">
-        {representative && (
+        {representative ? (
           <p>
             대표 출처:{" "}
             <a
@@ -237,6 +257,19 @@ export default async function TrendDetailPage({
               className="underline"
             >
               {representative.sourceName} — {representative.title} ↗
+            </a>
+          </p>
+        ) : (
+          // 관련 출처를 못 읽어도 카드가 가진 대표 링크는 항상 보여준다
+          <p>
+            대표 출처:{" "}
+            <a
+              href={item.representative_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline"
+            >
+              {item.representative_source_name ?? "출처 미상"} — {item.title} ↗
             </a>
           </p>
         )}
@@ -267,11 +300,13 @@ export default async function TrendDetailPage({
         ))}
       </div>
 
-      <p className="text-xs text-black/40 dark:text-white/40">
-        AI 분석: {analysis?.model_name ?? "미상"} ·{" "}
-        {formatDate(analysis?.generated_at)} · 분석 결과는 자동 생성되며 원문
-        확인을 권장합니다
-      </p>
+      {analysis && (
+        <p className="text-xs text-black/40 dark:text-white/40">
+          AI 분석: {analysis.model_name ?? "미상"} ·{" "}
+          {formatDate(analysis.generated_at)} · 분석 결과는 자동 생성되며 원문
+          확인을 권장합니다
+        </p>
+      )}
 
       <ErrorReportForm publishedItemId={item.id} />
 

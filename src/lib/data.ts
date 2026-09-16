@@ -1,6 +1,16 @@
 import "server-only";
 
+import { cache } from "react";
+
 import { createClient, createServiceRoleClient } from "@/lib/supabase/server";
+import {
+  getVaultRecord,
+  VaultError,
+  vaultPeriodKey,
+  type AnalysisRow,
+  type PolicyDetailRow,
+  type VaultRecord,
+} from "@/lib/vault";
 import type { PublishedItem } from "@/types/analysis";
 
 export const PAGE_SIZE = 20;
@@ -11,7 +21,7 @@ export type ItemFilters = {
   robot_field?: string;
   importance?: string;
   evidence_level?: string;
-  kiro_axis?: string; // KIRO 업무축 (v1.1 — analyses.kiro_relevance_axes)
+  kiro_axis?: string; // KIRO 업무축 (v1.1 — published_items.kiro_axes, 계약 C7)
   days?: number; // 최근 N일
   month?: string; // YYYY-MM (아카이브 탐색)
   from?: string; // display_date 범위 시작 (ISO — 일간 리포트 연계)
@@ -31,17 +41,9 @@ export async function getItems(filters: ItemFilters) {
   const supabase = await createClient();
   const page = Math.max(1, filters.page ?? 1);
 
-  // 업무축 필터는 현재 분석(analyses)과 inner join해 jsonb 배열 포함 검색
-  // (GIN 인덱스 사용, v1.1 분석부터 값이 존재)
-  // supabase-js 타입 파서가 동적 embed 문자열을 해석하지 못해 명시적으로 우회
-  const select = filters.kiro_axis
-    ? "*, kiro:analyses!published_items_current_analysis_id_fkey!inner(kiro_relevance_axes)"
-    : "*";
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let query: any = supabase
+  let query = supabase
     .from("published_items")
-    .select(select as "*", { count: "exact" })
+    .select("*", { count: "exact" })
     .eq("is_visible", true)
     .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
 
@@ -62,12 +64,14 @@ export async function getItems(filters: ItemFilters) {
       .order("published_at", { ascending: false });
   }
 
+  // 업무축 필터는 카드 자체의 published_items.kiro_axes(jsonb 배열) 포함 검색 (계약 C7).
+  // 예전처럼 analyses 를 inner join 하면 분석이 금고로 옮겨진(analyses 삭제) 카드가
+  // 목록에서 사라진다. 값은 publish.py 가 카드를 쓸 때 채우고, 마이그레이션이 백필한다.
   if (filters.kiro_axis) {
-    query = query.filter(
-      "kiro.kiro_relevance_axes",
-      "cs",
-      JSON.stringify([filters.kiro_axis]),
-    );
+    // 배열을 그대로 넘기면 postgrest-js 가 `cs.{…}`(Postgres 배열 리터럴)로 보내고
+    // jsonb 컬럼에서는 22P02 'invalid input syntax for type json' → HTTP 400 이 난다.
+    // 문자열은 그대로 실리므로 JSON 문자열(`cs.["…"]`)로 넘긴다 → `kiro_axes @> '["…"]'::jsonb`.
+    query = query.contains("kiro_axes", JSON.stringify([filters.kiro_axis]));
   }
   if (filters.category) query = query.eq("category", filters.category);
   if (filters.region) query = query.eq("region", filters.region);
@@ -102,45 +106,165 @@ export async function getItems(filters: ItemFilters) {
   return { items: (data ?? []) as PublishedItem[], total: count ?? 0, page };
 }
 
+/** published_items 행 — 상세 화면이 쓰는 컬럼 (카드 타입 + 금고 관련). */
+export type PublishedItemRow = PublishedItem & {
+  /** 금고로 옮겨진 뒤 NULL 이 될 수 있다 (20260917000001_vault: ON DELETE SET NULL) */
+  current_analysis_id: string | null;
+  /** 부속(분석·관련 출처)이 금고로 옮겨져 DB에서 지워진 시각. 있으면 금고에서 읽는다. */
+  vaulted_at: string | null;
+  /**
+   * KIRO 업무축 — 카드에 복제된 값 (계약 C7, 20260917000001_vault). 목록의 업무축
+   * 필터가 analyses 대신 이 컬럼을 쓴다. 백필 전 카드·v1.0 분석은 NULL.
+   */
+  kiro_axes: string[] | null;
+  is_visible: boolean;
+};
+
+/** 금고 읽기 실패 — 화면 문구를 나누기 위해 사유와 영구 여부를 함께 넘긴다. */
+export type VaultReadError = {
+  /** 운영자 로그용 사유 (화면에는 내지 않는다) */
+  message: string;
+  /** true = 다시 시도해도 같다(색인 없음·id 불일치·손상) → '운영자에게 알려 주세요' */
+  permanent: boolean;
+};
+
+export type ItemDetail = {
+  item: PublishedItemRow;
+  analysis: AnalysisRow | null;
+  policy: PolicyDetailRow | null;
+  /** true 면 분석·관련 출처를 DB 가 아니라 보관 파일(금고)에서 읽었다 */
+  fromVault: boolean;
+  /** 금고 읽기 실패 — 있으면 카드 정보만 표시 */
+  vaultError: VaultReadError | null;
+};
+
+/**
+ * 금고 레코드 읽기 — 같은 요청 안에서는 한 번만 내려받는다 (React.cache).
+ * getItemDetail 과 getRelatedSources 가 같은 레코드를 쓴다.
+ */
+const readVaultRecord = cache(
+  (period: string, id: string): Promise<VaultRecord> =>
+    getVaultRecord(period, id),
+);
+
+/** 금고 예외 → 화면용 구조. VaultError 가 아닌 것(코드 결함)은 영구로 본다. */
+function toVaultReadError(e: unknown): VaultReadError {
+  if (e instanceof VaultError) {
+    return { message: `[${e.kind}] ${e.message}`, permanent: e.permanent };
+  }
+  return {
+    message: e instanceof Error ? e.message : String(e),
+    permanent: true,
+  };
+}
+
 /** 동향 상세: 게시물 + 현재 분석 + 정책 상세 (FR-009). */
-export async function getItemDetail(id: string) {
+export async function getItemDetail(id: string): Promise<ItemDetail | null> {
   const supabase = await createClient();
-  const { data: item } = await supabase
+  const { data } = await supabase
     .from("published_items")
     .select("*")
     .eq("id", id)
     .maybeSingle();
-  if (!item) return null;
+  if (!data) return null;
+  const item = data as PublishedItemRow;
+
+  // policy_details 는 DB 에 영구히 남는다 — 금고 여부와 무관하게 DB 우선
+  const policyQuery = supabase
+    .from("policy_details")
+    .select("*")
+    .eq("published_item_id", id)
+    .maybeSingle();
+
+  if (item.vaulted_at) {
+    // 금고 경로: analyses 는 이미 DB 에서 지워졌다. 실패해도 페이지는 살린다 —
+    // 카드(제목·요약·링크)만 보여주고 안내 문구를 띄운다.
+    let record: VaultRecord | null = null;
+    let vaultError: VaultReadError | null = null;
+    try {
+      record = await readVaultRecord(vaultPeriodKey(item.published_at), id);
+    } catch (e) {
+      vaultError = toVaultReadError(e);
+      console.error(
+        `[vault] 상세 읽기 실패 item=${id} ` +
+          `${vaultError.permanent ? "영구" : "일시"}: ${vaultError.message}`,
+      );
+    }
+    const { data: policy } = await policyQuery;
+    return {
+      item,
+      analysis: record?.analysis ?? null,
+      policy: (policy as PolicyDetailRow | null) ?? record?.policy ?? null,
+      fromVault: true,
+      vaultError,
+    };
+  }
 
   const [{ data: analysis }, { data: policy }] = await Promise.all([
-    supabase
-      .from("analyses")
-      .select("*")
-      .eq("id", item.current_analysis_id)
-      .maybeSingle(),
-    supabase
-      .from("policy_details")
-      .select("*")
-      .eq("published_item_id", id)
-      .maybeSingle(),
+    item.current_analysis_id
+      ? supabase
+          .from("analyses")
+          .select("*")
+          .eq("id", item.current_analysis_id)
+          .maybeSingle()
+      : Promise.resolve({ data: null }),
+    policyQuery,
   ]);
 
-  return { item, analysis, policy };
+  return {
+    item,
+    analysis: (analysis as AnalysisRow | null) ?? null,
+    policy: (policy as PolicyDetailRow | null) ?? null,
+    fromVault: false,
+    vaultError: null,
+  };
 }
+
+export type RelatedSource = {
+  isRepresentative: boolean;
+  title: string;
+  url: string;
+  publishedAt: string | null;
+  sourceName: string;
+};
 
 /**
  * 관련 출처 목록 (FR-009).
  * raw_items는 RLS상 운영자 전용이므로 서버에서 service role로
  * 제목·URL·출처명만 제한적으로 조회해 넘긴다.
+ * 금고로 옮겨진 카드(vaulted_at)는 구성원 raw_items 의 본문·제목 부속이 DB에서
+ * 비워지므로(cluster_members 행 자체는 남긴다 — 계약 C4) 금고 레코드의
+ * related_sources 를 쓴다. 금고 읽기 실패는 getItemDetail 이 이미 알렸으므로
+ * 여기서는 빈 목록을 돌려준다 (같은 요청 안에서는 재요청하지 않는다).
  */
-export async function getRelatedSources(clusterId: string) {
+export async function getRelatedSources(
+  item: Pick<PublishedItemRow, "id" | "cluster_id" | "published_at" | "vaulted_at">,
+): Promise<RelatedSource[]> {
+  if (item.vaulted_at) {
+    let record: VaultRecord;
+    try {
+      record = await readVaultRecord(vaultPeriodKey(item.published_at), item.id);
+    } catch {
+      return [];
+    }
+    return [...record.related_sources]
+      .sort((a, b) => Number(b.is_representative) - Number(a.is_representative))
+      .map((s) => ({
+        isRepresentative: s.is_representative,
+        title: s.title ?? "(제목 없음)",
+        url: s.url,
+        publishedAt: s.published_at,
+        sourceName: s.source_name ?? "수동 등록",
+      }));
+  }
+
   const supabase = createServiceRoleClient();
   const { data } = await supabase
     .from("cluster_members")
     .select(
       "is_representative, raw_items(title, url, published_at, sources(name))",
     )
-    .eq("cluster_id", clusterId)
+    .eq("cluster_id", item.cluster_id)
     .order("is_representative", { ascending: false });
 
   type Row = {

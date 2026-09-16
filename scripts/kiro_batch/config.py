@@ -32,6 +32,10 @@ def parse_bool(value: object) -> bool:
 class Settings:
     # Supabase / DB
     supabase_db_url: str = ""
+    # Storage REST(금고 파일 업로드·검증)용 — 웹과 같은 변수명을 쓴다
+    # (NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY). cleanup.yml에서만 넘긴다.
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
 
     # Gemini
     gemini_api_key: str = ""
@@ -131,6 +135,17 @@ class Settings:
     # 분석(WARN·FAIL)은 이 값과 무관하게 디버깅용으로 보존한다
     keep_raw_response: bool = False
 
+    # 파일 금고 (2026-09-17, vault.py — DB 500 MB 한도 대응). app_settings 동일 키.
+    # 반달 기간(1~15일 / 16일~말일)의 마지막 날 뒤 며칠이 지나야 그 기간을 금고 파일로
+    # 내보낼지. 하한 14 = publish.MERGE_WINDOW_DAYS(7)의 2배 — 더 작게 두면 vault가
+    # 14로 올리고 경고한다(C8). 오늘이 속한 기간은 절대 아님
+    vault_window_days: int = 14
+    # 검증(Storage·Release 둘 다)이 끝난 기간의 부속을 DB에서 지울지 — 기본 꺼짐.
+    # 내보내기·검증은 이 값과 무관하게 매일 돈다
+    vault_prune_enabled: bool = False
+    # prune 실행당 처리 상한(카드 수). 200건 배치 × 15회 = 3,000건이면 cleanup 예산 안
+    vault_prune_max_per_run: int = 3000
+
     # 수집
     fetch_timeout_seconds: float = 20.0
     fetch_max_bytes: int = 3_000_000
@@ -152,6 +167,8 @@ class Settings:
         s.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
         s.naver_client_id = os.environ.get("NAVER_CLIENT_ID", "")
         s.naver_client_secret = os.environ.get("NAVER_CLIENT_SECRET", "")
+        s.supabase_url = os.environ.get("NEXT_PUBLIC_SUPABASE_URL", "")
+        s.supabase_service_role_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
         env_map = {
             "article_model": "ARTICLE_MODEL",
@@ -178,6 +195,9 @@ class Settings:
             "nonrep_body_retention_days": "NONREP_BODY_RETENTION_DAYS",
             "keep_exclude_body": "KEEP_EXCLUDE_BODY",
             "keep_raw_response": "KEEP_RAW_RESPONSE",
+            "vault_window_days": "VAULT_WINDOW_DAYS",
+            "vault_prune_enabled": "VAULT_PRUNE_ENABLED",
+            "vault_prune_max_per_run": "VAULT_PRUNE_MAX_PER_RUN",
         }
         for attr, env_key in env_map.items():
             raw = os.environ.get(env_key)
@@ -217,6 +237,9 @@ class Settings:
             "nonrep_body_retention_days": "nonrep_body_retention_days",
             "keep_exclude_body": "keep_exclude_body",
             "keep_raw_response": "keep_raw_response",
+            "vault_window_days": "vault_window_days",
+            "vault_prune_enabled": "vault_prune_enabled",
+            "vault_prune_max_per_run": "vault_prune_max_per_run",
         }
         for key, attr in mapping.items():
             if key not in rows:

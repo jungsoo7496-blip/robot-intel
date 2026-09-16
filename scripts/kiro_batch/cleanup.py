@@ -16,6 +16,12 @@
 - 분석 대기 job 만료 → CANCELLED                            (analysis_expire_days)
 - EXPIRED·EXCLUDE·FAILED raw_items 행 삭제                  (90일 경과 + 클러스터 미소속)
 - 오래된 source_runs·gemini_calls 정리                       (기존)
+- PASS 분석의 raw_response NULL                             (keep_raw_response=false —
+  쓰기 경로가 설정을 안 지켜 하루 0.7 MiB씩 쌓이던 누수, 2026-09-17)
+- 파일 금고 (vault.py, 2026-09-17): 반달 기간(1~15일 / 16일~말일)의 마지막 날 +
+  vault_window_days(하한 14) 지난 기간을 Storage 'vault' 버킷에 내보내고 같은
+  실행에서 재다운로드 검증 → (vault_prune_enabled 이고 Storage·Release 검증이
+  모두 끝난 기간만) 부속을 DB에서 지움(cluster_members는 남김) → 자가점검
 
 일회성 작업 (env CLEANUP_TASKS 쉼표 목록 — 운영 화면 버튼이 workflow_dispatch
 input으로 넘긴다):
@@ -43,6 +49,7 @@ from collections.abc import Callable
 import psycopg
 from psycopg.rows import dict_row
 
+from . import vault
 from .config import Settings
 from .db import connect, load_app_settings
 from .publish import MERGE_WINDOW_DAYS
@@ -411,6 +418,15 @@ def build_plan(
         ("만료 행 삭제", lambda: delete_dead_rows(conn, DEAD_ROW_RETENTION_DAYS)),
         ("source_runs", lambda: delete_old_source_runs(conn)),
         ("gemini_calls", lambda: delete_old_gemini_calls(conn)),
+        # 누수 차단: keep_raw_response=false인데 쓰기 경로가 안 지킨 PASS 응답 원문
+        (
+            "raw_response(PASS)",
+            lambda: 0 if settings.keep_raw_response else null_raw_response(conn),
+        ),
+        # 파일 금고 — 순서 고정: 내보내기·검증 → 정리(스위치 뒤) → 자가점검
+        ("금고 내보내기·검증", lambda: vault.export_and_verify(conn, settings)),
+        ("금고 정리", lambda: vault.prune(conn, settings)),
+        ("금고 자가점검", lambda: vault.selfcheck(conn, settings)),
     ]
     return plan
 
@@ -531,7 +547,10 @@ def main(argv: list[str] | None = None) -> int:
         f"분석 만료 {settings.analysis_expire_days}일, "
         f"비대표 본문 {nonrep_retention_days(settings.nonrep_body_retention_days)}일, "
         f"EXCLUDE 본문 보존 {settings.keep_exclude_body}, "
-        f"raw_response 보존 {settings.keep_raw_response}"
+        f"raw_response 보존 {settings.keep_raw_response}, "
+        f"금고 창 {vault.effective_window_days(settings.vault_window_days)}일, "
+        f"금고 정리 {'켜짐' if settings.vault_prune_enabled else '꺼짐'}"
+        f"(상한 {settings.vault_prune_max_per_run}건)"
         + (f" · 일회성 {one_off}" if one_off else "")
     )
 

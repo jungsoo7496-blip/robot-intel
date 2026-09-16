@@ -110,20 +110,53 @@ export async function toggleItemVisibility(formData: FormData) {
   revalidatePath("/trends");
 }
 
-/** AI 재분석 요청 (FR-014): 기존 분석은 보존, 큐에 작업을 다시 올린다. */
-export async function requestReanalysis(formData: FormData) {
+/** 운영 액션이 화면(useActionState)에 돌려주는 결과 — 던지지 않고 문장으로. */
+export type ActionResult = { ok: boolean; message: string };
+
+/**
+ * AI 재분석 요청 (FR-014): 기존 분석은 보존, 큐에 작업을 다시 올린다.
+ *
+ * 보관 파일(금고)로 옮겨진 카드(vaulted_at)는 거부한다 (계약 C12) — analyses 와
+ * 끝난 analysis_jobs 가 DB에서 지워져 배치가 처리할 수 없고, 처리해도 금고 파일과
+ * 어긋난다. 거절 이유는 던지지 않고 {ok:false, message} 로 돌려준다 (triggerAnalyzeNow
+ * 와 같은 이유 — 던지면 운영자가 사유를 영영 못 본다). 화면은 버튼도 숨긴다.
+ */
+export async function requestReanalysis(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
   const profile = await requireOperator();
-  const publishedItemId = String(formData.get("published_item_id"));
+  const publishedItemId = String(formData.get("published_item_id") ?? "");
+  if (!publishedItemId) {
+    return { ok: false, message: "대상 기사가 지정되지 않았습니다." };
+  }
 
   const supabase = createServiceRoleClient();
-  const { data: item } = await supabase
+  const { data: item, error: itemError } = await supabase
     .from("published_items")
-    .select("cluster_id")
+    .select("cluster_id, vaulted_at")
     .eq("id", publishedItemId)
     .maybeSingle();
-  if (!item) return;
+  if (itemError) {
+    return {
+      ok: false,
+      message: `기사 조회에 실패했습니다: ${itemError.message}`,
+    };
+  }
+  if (!item) {
+    return {
+      ok: false,
+      message: "대상 기사를 찾을 수 없습니다. 화면을 새로 고쳐 주세요.",
+    };
+  }
+  if (item.vaulted_at) {
+    return {
+      ok: false,
+      message: "보관 파일로 옮긴 기사는 재분석할 수 없습니다.",
+    };
+  }
 
-  await supabase
+  const { error: jobError } = await supabase
     .from("analysis_jobs")
     .update({
       status: "PENDING",
@@ -136,6 +169,12 @@ export async function requestReanalysis(formData: FormData) {
     })
     .eq("cluster_id", item.cluster_id)
     .eq("job_type", "ARTICLE");
+  if (jobError) {
+    return {
+      ok: false,
+      message: `재분석 요청 저장에 실패했습니다: ${jobError.message}`,
+    };
+  }
   await logEvent(
     supabase,
     "REANALYZE",
@@ -145,6 +184,10 @@ export async function requestReanalysis(formData: FormData) {
     "운영자 재분석 요청 — 다음 분석 배치에서 처리",
   );
   revalidatePath("/admin/error-reports");
+  return {
+    ok: true,
+    message: "재분석을 요청했습니다. 다음 분석 배치에서 처리됩니다.",
+  };
 }
 
 // 수동 URL 등록(submitManualUrl)은 2026-09-08에 제거했다 (사용자 요구 4 —
@@ -189,8 +232,8 @@ export async function triggerCollectNow() {
 // 이유를 영영 못 본다. (next/dist/docs/01-app/01-getting-started/10-error-handling.md)
 // ------------------------------------------------------------
 
-/** 강제 분석 폼(useActionState)에 돌려주는 결과. */
-export type AnalyzeRunResult = { ok: boolean; message: string };
+/** 강제 분석 폼(useActionState)에 돌려주는 결과 — ActionResult 와 같은 모양. */
+export type AnalyzeRunResult = ActionResult;
 
 function analyzeFail(message: string): AnalyzeRunResult {
   return { ok: false, message };

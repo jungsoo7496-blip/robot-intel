@@ -222,6 +222,29 @@ def determine_period(conn, kst_today: date) -> tuple[date, date] | None:
     return period_start, period_end
 
 
+VAULTED_PERIOD_MESSAGE = "금고로 옮긴 기간은 재생성할 수 없습니다"
+
+
+def count_vaulted_cards(conn, period_start: date, period_end: date) -> int:
+    """그 주차에 금고로 옮겨진(vaulted_at 있는) 카드 수 — 기간 판정은 select_brief_targets와 같다.
+
+    금고 카드는 analyses가 DB에 없어 후보 선별(analyses inner join)에서 조용히 빠진다.
+    그대로 재생성하면 그 주차 브리프가 반쪽이 되므로 호출 측이 중단한다 (2026-09-17, [14]).
+    """
+    start_ts, end_ts = kst_bounds(period_start, period_end)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) AS n FROM published_items p
+            WHERE p.vaulted_at IS NOT NULL
+              AND coalesce(p.source_published_at, p.published_at) >= %s
+              AND coalesce(p.source_published_at, p.published_at) < %s
+            """,
+            (start_ts, end_ts),
+        )
+        return int(cur.fetchone()["n"])
+
+
 def select_brief_targets(conn, period_start: date, period_end: date) -> list[dict]:
     """주간 후보 선별 (외부 리뷰 지시 3항).
 
@@ -626,6 +649,16 @@ def main() -> int:
                 # 강제 생성: 직전 완결 주차를 판정 무시하고 재생성 (새 버전으로 저장)
                 period = previous_completed_week(kst_today)
             period_start, period_end = period
+
+        # 금고로 옮긴 카드가 있는 주차는 후보가 반쪽이 된다 — 재생성하지 않는다 ([14])
+        vaulted = count_vaulted_cards(conn, period_start, period_end)
+        if vaulted:
+            conn.rollback()
+            print(
+                f"[brief] {VAULTED_PERIOD_MESSAGE} — {period_start}~{period_end}에 "
+                f"금고 카드 {vaulted}건 (기존 발행본을 그대로 둡니다)"
+            )
+            return 0
 
         targets = select_brief_targets(conn, period_start, period_end)
         print(f"[brief] 기간 {period_start}~{period_end}, 대상 {len(targets)}건")

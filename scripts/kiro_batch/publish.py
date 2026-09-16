@@ -422,12 +422,12 @@ def publish_analysis(
             INSERT INTO published_items (
               cluster_id, current_analysis_id, title,
               category, region, robot_field,
-              importance, evidence_level, kiro_relevance,
+              importance, evidence_level, kiro_relevance, kiro_axes,
               source_published_at, representative_source_name,
               representative_url, related_source_count, search_text,
               one_line_summary, kiro_implication_excerpt
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (cluster_id) DO UPDATE SET
               current_analysis_id = EXCLUDED.current_analysis_id,
               title = EXCLUDED.title,
@@ -437,6 +437,7 @@ def publish_analysis(
               importance = EXCLUDED.importance,
               evidence_level = EXCLUDED.evidence_level,
               kiro_relevance = EXCLUDED.kiro_relevance,
+              kiro_axes = EXCLUDED.kiro_axes,
               representative_source_name = EXCLUDED.representative_source_name,
               representative_url = EXCLUDED.representative_url,
               related_source_count = EXCLUDED.related_source_count,
@@ -455,6 +456,8 @@ def publish_analysis(
                 analysis.importance,
                 analysis.evidence_level,
                 analysis.kiro_relevance,
+                # 업무축 사본(C7) — 화면 필터가 analyses 대신 이 컬럼을 읽는다 (금고 카드 유지)
+                json.dumps(analysis.kiro_relevance_axes, ensure_ascii=False),
                 rep["published_at"],
                 rep["source_name"],
                 rep["url"],

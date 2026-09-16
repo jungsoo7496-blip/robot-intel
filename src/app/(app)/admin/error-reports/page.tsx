@@ -2,11 +2,8 @@ import Link from "next/link";
 
 import { createServiceRoleClient } from "@/lib/supabase/server";
 
-import {
-  requestReanalysis,
-  resolveReport,
-  toggleItemVisibility,
-} from "../actions";
+import { resolveReport, toggleItemVisibility } from "../actions";
+import { ReanalyzeButton } from "./reanalyze-button";
 
 export const dynamic = "force-dynamic";
 
@@ -42,7 +39,27 @@ type Row = {
   representative_source_name: string | null;
   is_visible: boolean;
   hidden_reason: string | null;
+  /** 있으면 부속이 보관 파일(금고)로 옮겨져 재분석할 수 없다 (계약 C12) */
+  vaulted_at: string | null;
 };
+
+/** 오류 신고에 붙어 오는 대상 기사 (published_items 임베드). */
+type ReportItem = {
+  id: string;
+  title: string;
+  is_visible: boolean;
+  hidden_reason: string | null;
+  vaulted_at: string | null;
+};
+
+/** 보관 파일로 옮긴 기사 — 버튼 대신 이유를 한 줄로 (계약 C12). */
+function VaultedNote() {
+  return (
+    <span className="text-xs text-black/45 dark:text-white/45">
+      보관 파일로 옮김 · 재분석 불가
+    </span>
+  );
+}
 
 type ListState = "visible" | "hidden" | "all";
 
@@ -94,7 +111,7 @@ export default async function ContentAdminPage({
   let listQuery = supabase
     .from("published_items")
     .select(
-      "id, title, published_at, representative_source_name, is_visible, hidden_reason",
+      "id, title, published_at, representative_source_name, is_visible, hidden_reason, vaulted_at",
       { count: "exact" },
     );
   if (state !== "all") listQuery = listQuery.eq("is_visible", state === "visible");
@@ -117,7 +134,7 @@ export default async function ContentAdminPage({
       .eq("is_visible", false),
     supabase
       .from("error_reports")
-      .select("*, published_items(id, title, is_visible, hidden_reason)")
+      .select("*, published_items(id, title, is_visible, hidden_reason, vaulted_at)")
       .order("created_at", { ascending: false })
       .limit(REPORT_LIMIT),
   ]);
@@ -168,12 +185,7 @@ export default async function ContentAdminPage({
           </p>
         ) : (
           reports.map((r) => {
-            const item = r.published_items as {
-              id: string;
-              title: string;
-              is_visible: boolean;
-              hidden_reason: string | null;
-            } | null;
+            const item = r.published_items as ReportItem | null;
             return (
               <div
                 key={r.id}
@@ -259,14 +271,14 @@ export default async function ContentAdminPage({
                           {item.is_visible ? "숨기기" : "다시 보이기"}
                         </button>
                       </form>
-                      <form action={requestReanalysis}>
-                        <input
-                          type="hidden"
-                          name="published_item_id"
-                          value={item.id}
+                      {item.vaulted_at ? (
+                        <VaultedNote />
+                      ) : (
+                        <ReanalyzeButton
+                          publishedItemId={item.id}
+                          className={smallButtonClass}
                         />
-                        <button className={smallButtonClass}>AI 재분석</button>
-                      </form>
+                      )}
                     </>
                   )}
                 </div>
@@ -378,14 +390,14 @@ export default async function ContentAdminPage({
                         <button className={smallButtonClass}>다시 보이기</button>
                       </form>
                     )}
-                    <form action={requestReanalysis}>
-                      <input
-                        type="hidden"
-                        name="published_item_id"
-                        value={item.id}
+                    {item.vaulted_at ? (
+                      <VaultedNote />
+                    ) : (
+                      <ReanalyzeButton
+                        publishedItemId={item.id}
+                        className={smallButtonClass}
                       />
-                      <button className={smallButtonClass}>AI 재분석</button>
-                    </form>
+                    )}
                   </div>
                 </li>
               ))}
@@ -416,7 +428,8 @@ export default async function ContentAdminPage({
         )}
         <p className="text-xs text-black/50 dark:text-white/50">
           AI 재분석은 기존 분석을 지우지 않고, 다음 분석 배치에서 새 분석으로 바꿔
-          놓습니다.
+          놓습니다. 오래되어 보관 파일로 옮긴 기사는 분석 원본이 DB에 없어 재분석
+          버튼이 나타나지 않습니다.
         </p>
       </section>
     </div>

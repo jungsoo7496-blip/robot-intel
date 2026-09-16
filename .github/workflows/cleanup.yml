@@ -3,6 +3,11 @@
 #   본문 비우기, 오래된 추출·분석 대기 만료, 90일 지난 만료 행 삭제, 실행 기록 정리
 # - 운영 화면의 정리 버튼은 workflow_dispatch + tasks 입력으로 일회성 작업을 넘긴다
 #   (null_raw_text_all, null_raw_response, expire_extract_backlog, cancel_stale_jobs)
+# - 파일 금고(2026-09-17, kiro_batch/vault.py): 반달 기간(1~15일 / 16일~말일)의 마지막 날 +
+#   vault_window_days(하한 14) 지난 기간을 Storage 'vault' 버킷에 내보내고 같은 실행에서
+#   재다운로드 검증. 부속 삭제(prune)는 app_settings vault_prune_enabled='true' 이고
+#   Storage·Release 검증이 모두 끝난 기간만 (cluster_members는 남긴다).
+#   Release 미러는 옛 비공개 저장소(archive)의 backup.yml이 주간으로 한다.
 # 잠금 복구는 여기가 아니라 매 분석 배치 시작 시 수행한다 (설계 §9.3).
 # VACUUM FULL은 여기서 하지 않는다 (실행 시간·테이블 잠금) — scripts/db_vacuum_full.bat
 name: cleanup
@@ -29,9 +34,13 @@ jobs:
     runs-on: ubuntu-latest
     # 배치 UPDATE 2,000행 단위라 일일 정리는 1~2분. 일회성 전량 정리도
     # 10만 행 기준 수 분이면 끝난다. 넘기면 다음 실행이 이어서 한다 (멱등).
-    timeout-minutes: 10
+    # 금고 내보내기는 반달 기간(약 4,000건, 12 MB — 2026-08 실측의 절반) 당 1분 안팎 — 실행당 최대 3개 기간.
+    timeout-minutes: 15
     env:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      # 금고 파일 업로드·검증 — Storage REST (service role). 웹과 같은 변수명
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       # 정기(schedule) 실행은 inputs가 비어 있어 일일 정리만 돈다
       CLEANUP_TASKS: ${{ inputs.tasks }}
     steps:
