@@ -187,6 +187,20 @@ def run_channel(
     return stats, stats["access_checked_count"]
 
 
+def exit_code_for(succeeded: int, failed: int) -> int:
+    """조합(채널×검색어) 성공·실패 수 → 프로세스 종료 코드.
+
+    PRISM·ScienceON·NANET 같은 사이트 하나가 응답을 안 해도 나머지 조합은 다
+    수집된다. 그런데 실패가 1개라도 있으면 1을 돌려줘 Actions 실행 전체가
+    '실패'로 찍혔다 (2026-09-22 최근 5회 중 4회). 실패한 조합은 source_runs·
+    채널의 마지막 오류에 그대로 남으니 프로세스는 하나라도 성공했으면 0,
+    전부 실패했을 때만 1.
+    """
+    if failed == 0:
+        return 0
+    return 0 if succeeded > 0 else 1
+
+
 def main() -> int:
     settings = Settings.from_env()
     settings.require("supabase_db_url")
@@ -212,7 +226,8 @@ def main() -> int:
     }
 
     conn = connect(settings.supabase_db_url)
-    exit_code = 0
+    succeeded = 0
+    failed: list[str] = []
     try:
         # 보고서 계층(core/tool) 키워드 — keyword_rules, 실패 시 내장 기본값
         configure_report_tiers(conn)
@@ -279,6 +294,7 @@ def main() -> int:
                     repo.mark_channel_result(conn, ch.channel_id, ok=True)
                     repo.mark_source_result(conn, ch.source_id, ok=True)
                     conn.commit()
+                    succeeded += 1
                     print(
                         f"[collect_reports] {label}: "
                         f"수집 {stats['fetched_count']} · "
@@ -291,7 +307,7 @@ def main() -> int:
                     )
                 except Exception as e:  # noqa: BLE001 — 조합 실패는 기록하고 계속
                     conn.rollback()
-                    exit_code = 1
+                    failed.append(label)
                     msg = _safe_error(e)
                     repo.record_run(
                         conn, ch.source_id, ch.channel_id, "FAILED",
@@ -310,7 +326,17 @@ def main() -> int:
                     )
     finally:
         conn.close()
-    return exit_code
+    if failed:
+        outcome = (
+            "성공한 조합이 있어 정상 종료" if succeeded
+            else "전부 실패 — 종료 코드 1"
+        )
+        print(
+            f"[collect_reports] 실패 {len(failed)}조합 / 성공 {succeeded}조합 — "
+            f"{outcome}: {', '.join(failed)}",
+            file=sys.stderr,
+        )
+    return exit_code_for(succeeded, len(failed))
 
 
 if __name__ == "__main__":

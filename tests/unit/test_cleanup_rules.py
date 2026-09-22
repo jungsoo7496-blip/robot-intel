@@ -321,3 +321,84 @@ class TestCancelStaleJobs:
         sql, _ = conn.executed[0]
         assert "job_type = 'ARTICLE'" in sql  # 브리프 job 제외
         assert "priority >= 10" in sql  # 운영 화면 재분석(priority 5) 제외
+
+
+# ------------------------------------------------------------
+# null_unpublished_bulk — 게시 카드 없는 클러스터의 부속 비우기 (2026-09-22)
+# 금고는 게시 기사만 담으므로 로봇 뉴스 아님·병합됨 클러스터의 analyses·대표 본문은
+# 여기서 비운다. 기사 행(제목·링크)·클러스터·구성원은 남긴다 — 운영자 제약.
+# ------------------------------------------------------------
+class TestNullUnpublishedBulk:
+    def test_zero_days_never_touches_db(self):
+        conn = _SqlCaptureConn()
+        assert cleanup.null_unpublished_bulk(conn, 0) == 0
+        assert cleanup.null_unpublished_bulk(conn, -1) == 0
+        assert conn.executed == []
+
+    def test_deletes_analyses_then_nulls_representative_body(self):
+        conn = _SqlCaptureConn()
+        cleanup.null_unpublished_bulk(conn, 30)
+        assert len(conn.executed) == 2
+        (del_sql, del_params), (upd_sql, upd_params) = conn.executed
+        assert del_sql.strip().startswith("DELETE FROM analyses")
+        assert upd_sql.strip().startswith(
+            "UPDATE raw_items SET clean_text = NULL, raw_text = NULL"
+        )
+        # 보존 일수가 첫 매개변수, 배치 상한이 마지막 매개변수 (_run_batched 규약)
+        assert del_params[0] == 30 and del_params[-1] == cleanup.BATCH_ROWS
+        assert upd_params[0] == 30 and upd_params[-1] == cleanup.BATCH_ROWS
+
+    def test_only_old_unpublished_clusters_without_live_jobs(self):
+        conn = _SqlCaptureConn()
+        cleanup.null_unpublished_bulk(conn, 30)
+        for sql, params in conn.executed:
+            assert "c.created_at < now() - make_interval(days => %s)" in sql
+            assert (
+                "NOT EXISTS (SELECT 1 FROM published_items p WHERE p.cluster_id = c.id)"
+                in sql
+            )
+            assert "j.status = ANY(%s)" in sql
+            assert list(cleanup.ACTIVE_JOB_STATUSES) in params
+
+    def test_analysis_a_card_points_at_is_never_deleted(self):
+        # FK는 ON DELETE SET NULL이라 오류 없이 카드 본문만 사라진다 — SQL에서 막는다
+        conn = _SqlCaptureConn()
+        cleanup.null_unpublished_bulk(conn, 30)
+        del_sql, _ = conn.executed[0]
+        assert "p.current_analysis_id = a.id" in del_sql
+
+    def test_representative_body_protected_like_vault_c5(self):
+        conn = _SqlCaptureConn()
+        cleanup.null_unpublished_bulk(conn, 30)
+        upd_sql, upd_params = conn.executed[1]
+        # 같은 raw_item을 대표로 둔 다른 클러스터가 젊거나·미금고 카드가 있거나·job이 살아 있으면 보호
+        assert "c2.representative_raw_item_id = ri.id AND c2.id <> c.id" in upd_sql
+        assert "c2.created_at >= now() - make_interval(days => %s)" in upd_sql
+        assert "p2.vaulted_at IS NULL" in upd_sql
+        # 구성원으로 속한 클러스터(병합 대상 포함)에 살아 있는 job이 있으면 보호
+        assert "cm3.raw_item_id = ri.id AND j3.status = ANY(%s)" in upd_sql
+        # 자기 클러스터·다른 클러스터 나이 판정에 같은 일수를 쓴다
+        assert [p for p in upd_params if p == 30] == [30, 30]
+
+    def test_article_rows_clusters_and_members_are_kept(self):
+        conn = _SqlCaptureConn()
+        cleanup.null_unpublished_bulk(conn, 30)
+        joined = " ".join(sql for sql, _ in conn.executed)
+        assert "DELETE FROM raw_items" not in joined
+        assert "DELETE FROM content_clusters" not in joined
+        assert "DELETE FROM cluster_members" not in joined
+
+    def test_daily_plan_runs_it_after_nonrep_body_and_before_vault(self):
+        conn = _SqlCaptureConn()
+        labels = [label for label, _ in cleanup.build_plan(conn, Settings(), [])]
+        assert labels.index("미게시 부속") == labels.index("비대표 본문") + 1
+        assert labels.index("미게시 부속") < labels.index("금고 내보내기·검증")
+
+    def test_setting_default_env_and_app_settings(self, monkeypatch):
+        monkeypatch.delenv("UNPUBLISHED_RETENTION_DAYS", raising=False)
+        assert Settings().unpublished_retention_days == 30
+        s = Settings()
+        s.apply_app_settings({"unpublished_retention_days": "45"})
+        assert s.unpublished_retention_days == 45
+        monkeypatch.setenv("UNPUBLISHED_RETENTION_DAYS", "0")
+        assert Settings.from_env().unpublished_retention_days == 0

@@ -21,6 +21,7 @@ const RETENTION_RULES: Record<string, DaysRule | BoolRule> = {
   extract_expire_days: { kind: "days", max: 365 },
   analysis_expire_days: { kind: "days", max: 365 },
   nonrep_body_retention_days: { kind: "days", max: 365 },
+  unpublished_retention_days: { kind: "days", max: 365 },
   keep_exclude_body: { kind: "bool" },
   keep_raw_response: { kind: "bool" },
 };
@@ -36,6 +37,8 @@ const RETENTION_DESCRIPTIONS: Record<string, string> = {
     "분석 대기 job이 원문 발행 후 며칠을 넘기면 CANCELLED로 정리할지 (0=안 함)",
   nonrep_body_retention_days:
     "클러스터 대표가 아닌 구성원 본문(clean_text)을 며칠 뒤 비울지 — 2차 병합 창(7일)보다 짧으면 안 됨",
+  unpublished_retention_days:
+    "게시 안 된 클러스터(로봇 뉴스 아님·병합됨)의 AI 분석 결과와 대표 본문을 며칠 뒤 비울지 (0=안 함) — 제목·링크·수집 기록은 남김",
   keep_exclude_body: "로컬 필터 EXCLUDE 판정 항목의 본문을 보존할지",
   keep_raw_response: "Gemini 응답 원문(analyses.raw_response)을 보존할지",
 };

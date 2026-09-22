@@ -72,6 +72,15 @@ const RETENTION_FIELDS: RetentionField[] = [
     kind: "days",
   },
   {
+    key: "unpublished_retention_days",
+    label: "게시 안 된 클러스터 부속 보존",
+    help:
+      "AI가 로봇 뉴스가 아니라고 판정했거나 다른 사건에 병합돼 카드가 없는 클러스터의 " +
+      "분석 결과와 대표 본문을 며칠 뒤 비울지. 금고는 게시된 기사만 담으므로 여기서 비웁니다. " +
+      "제목·링크·수집 기록은 남습니다. 0이면 비우지 않습니다.",
+    kind: "days",
+  },
+  {
     key: "raw_text_retention_days",
     label: "raw_text 보존",
     help:
@@ -401,7 +410,8 @@ export default async function AdminDataPage() {
           <li>
             <span className="font-medium">왜:</span> 정리 배치가 본문·응답 원문을 비워도
             PostgreSQL은 파일 크기를 줄이지 않습니다. Supabase 용량 수치에 반영되려면 VACUUM
-            FULL로 raw_items·analyses 테이블을 다시 써야 합니다.
+            FULL로 raw_items·analyses 테이블을 다시 써야 합니다. 같은 실행이 카드 표(published_items)의
+            색인도 무중단으로 다시 짓습니다 — 금고 정리 뒤 부푼 검색 색인을 돌려받습니다.
           </li>
           <li>
             <span className="font-medium">어떻게:</span> 사무실 PC에서 프로젝트 폴더의{" "}

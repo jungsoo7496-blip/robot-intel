@@ -129,6 +129,9 @@ class Settings:
     # 클러스터 비대표 구성원 본문(clean_text)을 며칠 뒤 비울지 —
     # publish.MERGE_WINDOW_DAYS(7)보다 짧게 잡아도 cleanup이 7일로 올려 쓴다
     nonrep_body_retention_days: int = 7
+    # 게시 카드가 없는 클러스터(로봇 뉴스 아님·병합됨)의 analyses 행과 대표 본문을
+    # 며칠 뒤 비울지 — 금고는 게시된 기사만 내보내므로 여기서 따로 비운다. 0=안 함
+    unpublished_retention_days: int = 30
     # 로컬 필터 EXCLUDE 판정 항목의 본문을 저장·보존할지 (읽는 코드 없음)
     keep_exclude_body: bool = False
     # Gemini 응답 원문(analyses.raw_response)을 저장할지 — PASS가 아닌
@@ -193,6 +196,7 @@ class Settings:
             "extract_expire_days": "EXTRACT_EXPIRE_DAYS",
             "analysis_expire_days": "ANALYSIS_EXPIRE_DAYS",
             "nonrep_body_retention_days": "NONREP_BODY_RETENTION_DAYS",
+            "unpublished_retention_days": "UNPUBLISHED_RETENTION_DAYS",
             "keep_exclude_body": "KEEP_EXCLUDE_BODY",
             "keep_raw_response": "KEEP_RAW_RESPONSE",
             "vault_window_days": "VAULT_WINDOW_DAYS",
@@ -235,6 +239,7 @@ class Settings:
             "extract_expire_days": "extract_expire_days",
             "analysis_expire_days": "analysis_expire_days",
             "nonrep_body_retention_days": "nonrep_body_retention_days",
+            "unpublished_retention_days": "unpublished_retention_days",
             "keep_exclude_body": "keep_exclude_body",
             "keep_raw_response": "keep_raw_response",
             "vault_window_days": "vault_window_days",

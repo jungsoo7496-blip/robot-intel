@@ -13,6 +13,8 @@
 - EXCLUDE 판정 본문 NULL                                   (keep_exclude_body=false)
 - 클러스터 비대표 구성원 본문 NULL                          (nonrep_body_retention_days,
   publish.MERGE_WINDOW_DAYS보다 짧으면 그 값으로 올림 — 2차 병합 재선정 경로)
+- 게시 카드 없는 클러스터의 analyses 삭제 + 대표 본문 NULL  (unpublished_retention_days,
+  2026-09-22 — 금고는 게시 기사만 담으므로 여기서 비운다; 행·제목·링크·구성원은 남김)
 - 분석 대기 job 만료 → CANCELLED                            (analysis_expire_days)
 - EXPIRED·EXCLUDE·FAILED raw_items 행 삭제                  (90일 경과 + 클러스터 미소속)
 - 오래된 source_runs·gemini_calls 정리                       (기존)
@@ -33,7 +35,8 @@ input으로 넘긴다):
 VACUUM FULL은 여기서 하지 않는다 — Actions 실행 시간과 테이블 잠금 때문.
 NULL로 비운 공간은 VACUUM FULL 전에는 DB 용량 수치에 반영되지 않으므로,
 사무실 PC에서 scripts/db_vacuum_full.bat(→ `--vacuum-full`)을 배치 없는 시간에
-돌린다.
+돌린다. 같은 실행이 카드 표(published_items)의 색인을 REINDEX CONCURRENTLY로
+무중단 재구축한다 — 금고 정리(카드 전량 UPDATE) 뒤 두 배로 부푼 trigram 색인 회수.
 
 실행: python -m kiro_batch.cleanup [--tasks a,b] [--vacuum-full]
 """
@@ -251,6 +254,94 @@ def null_nonrep_body(conn: psycopg.Connection, retention_days: int) -> int:
     )
 
 
+def null_unpublished_bulk(conn: psycopg.Connection, retention_days: int) -> int:
+    """게시 카드가 없는 클러스터의 부속 비우기 — analyses 행 삭제 + 대표 본문 NULL.
+
+    금고(vault)는 게시된 기사만 내보낸다. 그래서 AI가 로봇 뉴스가 아니라고 판정한
+    클러스터와 다른 클러스터에 병합된 클러스터의 분석 결과·대표 본문은 어디서도
+    안 읽히는데 영구히 남았다 (2026-09-22 실측 analyses 10,580행 23 MiB + 대표 본문
+    1,901행 4 MiB, 하루 +186행 — 분석 7슬롯 뒤 두 배). 클러스터 행·raw_items 행
+    (제목·링크·수집 기록)·cluster_members는 남긴다 — 기사 자체를 지우는 게 아니다.
+
+    조건 (모두 만족):
+    - 클러스터 생성이 N일 초과 — 2차 병합 창(7일)과 검토 여유 밖
+    - published_items 없음 (게시된 클러스터의 부속은 금고가 맡는다)
+    - 살아 있는 분석 job 없음 — 재분석 중이면 다음 실행에서
+    - 어떤 카드도 current_analysis_id로 그 analyses 행을 가리키지 않음 (FK가 SET NULL
+      이라 오류는 안 나지만 카드 본문이 사라지므로 한 번 더 막는다)
+    대표 본문은 추가로: 같은 raw_item을 대표로 둔 다른 클러스터가 아직 젊거나 미금고
+    카드가 있거나(vault C5와 같은 규칙) job이 살아 있으면 보호, 구성원으로 속한 어느
+    클러스터에도 살아 있는 job이 없을 때만 비운다.
+    """
+    if retention_days <= 0:
+        return 0
+    active = list(ACTIVE_JOB_STATUSES)
+    deleted = _run_batched(
+        conn,
+        """
+        DELETE FROM analyses WHERE id IN (
+          SELECT a.id
+          FROM analyses a
+          JOIN content_clusters c ON c.id = a.cluster_id
+          WHERE c.created_at < now() - make_interval(days => %s)
+            AND NOT EXISTS (SELECT 1 FROM published_items p WHERE p.cluster_id = c.id)
+            AND NOT EXISTS (
+              SELECT 1 FROM published_items p WHERE p.current_analysis_id = a.id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM analysis_jobs j
+              WHERE j.cluster_id = c.id AND j.status = ANY(%s)
+            )
+          LIMIT %s
+        )
+        """,
+        (retention_days, active),
+        "미게시 분석",
+    )
+    nulled = _run_batched(
+        conn,
+        """
+        UPDATE raw_items SET clean_text = NULL, raw_text = NULL
+        WHERE id IN (
+          SELECT ri.id
+          FROM raw_items ri
+          JOIN content_clusters c ON c.representative_raw_item_id = ri.id
+          WHERE ri.clean_text IS NOT NULL
+            AND c.created_at < now() - make_interval(days => %s)
+            AND NOT EXISTS (SELECT 1 FROM published_items p WHERE p.cluster_id = c.id)
+            AND NOT EXISTS (
+              SELECT 1 FROM analysis_jobs j
+              WHERE j.cluster_id = c.id AND j.status = ANY(%s)
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM content_clusters c2
+              WHERE c2.representative_raw_item_id = ri.id AND c2.id <> c.id
+                AND (
+                  c2.created_at >= now() - make_interval(days => %s)
+                  OR EXISTS (
+                    SELECT 1 FROM published_items p2
+                    WHERE p2.cluster_id = c2.id AND p2.vaulted_at IS NULL
+                  )
+                  OR EXISTS (
+                    SELECT 1 FROM analysis_jobs j2
+                    WHERE j2.cluster_id = c2.id AND j2.status = ANY(%s)
+                  )
+                )
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM cluster_members cm3
+              JOIN analysis_jobs j3 ON j3.cluster_id = cm3.cluster_id
+              WHERE cm3.raw_item_id = ri.id AND j3.status = ANY(%s)
+            )
+          LIMIT %s
+        )
+        """,
+        (retention_days, active, retention_days, active, active),
+        "미게시 대표 본문",
+    )
+    return deleted + nulled
+
+
 def cancel_stale_jobs(conn: psycopg.Connection, expire_days: int) -> int:
     """원문 발행 N일 초과 **이고** 마지막으로 큐에 오른 지도 N일 지난
     분석 대기(PENDING·RETRY) → CANCELLED.
@@ -411,6 +502,11 @@ def build_plan(
                 conn, nonrep_retention_days(settings.nonrep_body_retention_days)
             ),
         ),
+        # 게시 안 된 클러스터(로봇 뉴스 아님·병합됨)의 분석 결과·대표 본문 — 금고 대상 밖
+        (
+            "미게시 부속",
+            lambda: null_unpublished_bulk(conn, settings.unpublished_retention_days),
+        ),
         (
             "분석 대기 만료",
             lambda: cancel_stale_jobs(conn, settings.analysis_expire_days),
@@ -463,7 +559,8 @@ VACUUM_TABLES = ("raw_items", "analyses")
 
 
 def vacuum_full(db_url: str) -> int:
-    """VACUUM (FULL, ANALYZE) raw_items·analyses — 전후 DB 크기를 출력한다.
+    """published_items 색인 REINDEX CONCURRENTLY + VACUUM (FULL, ANALYZE)
+    raw_items·analyses — 전후 DB 크기를 출력한다.
 
     Actions에서는 돌리지 않는다: 테이블을 통째로 잠그고(수집·분석 배치가
     기다리다 timeout) 수 분이 걸린다. 배치가 없는 시간에 사무실 PC에서 실행.
@@ -488,6 +585,36 @@ def vacuum_full(db_url: str) -> int:
             cur.execute("SELECT pg_database_size(current_database()) AS bytes")
             before = int(cur.fetchone()["bytes"])
             print(f"[vacuum] 시작 전 DB 크기: {before / 1048576:.1f} MB")
+            # 카드 표(published_items)는 VACUUM FULL 대상이 아니다 — 사이트가 항상
+            # 읽는 표라 통째로 잠글 수 없다. 대신 색인만 무중단으로 다시 짓는다:
+            # 금고 정리(vaulted_at UPDATE)나 백필처럼 카드 전량을 UPDATE 하면 색인,
+            # 특히 trigram GIN이 두 배로 부푸는데 VACUUM으로는 안 줄어든다
+            # (2026-09-18 실측 51→25 MB, 2026-09-22 54→36 MB). REINDEX CONCURRENTLY는
+            # 새 색인을 옆에 짓고 바꿔치기하므로 읽기·쓰기를 막지 않는다.
+            started = time.monotonic()
+            print("[vacuum] REINDEX TABLE CONCURRENTLY published_items … (무중단)")
+            try:
+                cur.execute("REINDEX TABLE CONCURRENTLY published_items")
+                cur.execute("VACUUM (ANALYZE) published_items")
+                print(
+                    f"[vacuum]   published_items 색인 재구축 완료 — "
+                    f"{time.monotonic() - started:.0f}초"
+                )
+            except psycopg.Error as e:  # 색인 재구축이 막혀도 아래 VACUUM FULL은 진행
+                print(f"[vacuum]   published_items 색인 재구축 실패: {e}", file=sys.stderr)
+            cur.execute(
+                """
+                SELECT c.relname FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+                WHERE i.indrelid = 'public.published_items'::regclass AND NOT i.indisvalid
+                """
+            )
+            invalid = [r["relname"] for r in cur.fetchall()]
+            if invalid:
+                # 중간에 끊기면 *_ccnew 색인이 invalid 로 남아 다음 REINDEX를 막는다
+                print(
+                    f"[vacuum]   경고: invalid 색인 {invalid} — DROP INDEX 로 지운 뒤 다시 실행",
+                    file=sys.stderr,
+                )
             for table in VACUUM_TABLES:
                 started = time.monotonic()
                 print(f"[vacuum] VACUUM (FULL, ANALYZE) {table} … (테이블 잠금, 수 분 소요)")
@@ -546,6 +673,7 @@ def main(argv: list[str] | None = None) -> int:
         f"추출 만료 {settings.extract_expire_days}일, "
         f"분석 만료 {settings.analysis_expire_days}일, "
         f"비대표 본문 {nonrep_retention_days(settings.nonrep_body_retention_days)}일, "
+        f"미게시 부속 {settings.unpublished_retention_days}일, "
         f"EXCLUDE 본문 보존 {settings.keep_exclude_body}, "
         f"raw_response 보존 {settings.keep_raw_response}, "
         f"금고 창 {vault.effective_window_days(settings.vault_window_days)}일, "
