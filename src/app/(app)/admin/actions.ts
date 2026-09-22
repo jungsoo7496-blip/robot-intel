@@ -278,8 +278,8 @@ async function manualRunBlockReason(
   if ((data ?? []).length >= MANUAL_RUN_DAILY_LIMIT) {
     return (
       `수동 분석은 24시간에 ${MANUAL_RUN_DAILY_LIMIT}회까지만 가능합니다. ` +
-      `정기 배치도 하루 4회 자동으로 돌며, GitHub 실행 시간이 월 한도가 있어 ` +
-      `무제한으로 돌릴 수 없습니다.`
+      `정기 배치가 하루 7회 자동으로 돌고, Gemini 일일 한도(모델당 500회)는 ` +
+      `수동으로 더 돌려도 늘지 않습니다.`
     );
   }
   if (await isWorkflowBusy(workflow)) {

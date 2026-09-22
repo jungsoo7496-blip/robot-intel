@@ -100,11 +100,9 @@ export async function getDashboardStats() {
       )
     : null;
 
-  // GitHub 청구 기준으로 추정한다 (2026-08-29 정정). 종전에는 내부 측정
-  // 초의 합만 보여줘서, 화면이 1,791분일 때 GitHub은 이미 2,000분 한도를
-  // 넘어 실행을 거부하고 있었다 — 사용자가 착시로 오판할 수 있는 숫자였다.
-  // 청구는 잡마다 (내부초 + 준비 오버헤드 ~75초)를 분 단위로 올림해 매긴다.
-  // CI 등 미계측 워크플로가 있어 이 추정도 하한이다 — 화면에 '추정' 표기.
+  // GitHub 청구 기준(잡마다 내부초 + 준비 오버헤드 ~75초를 분 단위 올림)으로 계산한다.
+  // 2026-09-14 공개 저장소(robot-intel)로 옮긴 뒤로는 월 한도가 없어 참고용 숫자다 —
+  // 배치가 폭주하면 여기서 먼저 튄다. 비공개로 되돌리면 무료 2,000분 한도가 다시 생긴다.
   const BILLING_OVERHEAD_SECONDS = 75;
   const monthMinutes = (monthUsage.data ?? []).reduce(
     (sum, r) =>
@@ -142,8 +140,6 @@ export async function getDashboardStats() {
     latestBrief: latestBrief.data,
     latestBackup: latestBackup.data,
     monthMinutes,
-    budgetMinutes: 1500,
-    warnMinutes: 1200,
     openReportCount: openReports.count ?? 0,
     operatorHiddenCount: operatorHidden.count ?? 0,
     failingSources: failing,

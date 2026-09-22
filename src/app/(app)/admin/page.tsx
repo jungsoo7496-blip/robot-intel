@@ -83,7 +83,6 @@ const ADMIN_MENU = [
 /** 운영 현황 (tasks §15.2) — 월 1회 점검용 한 화면 요약. */
 export default async function AdminHomePage() {
   const s = await getDashboardStats();
-  const budgetPct = Math.round((s.monthMinutes / s.budgetMinutes) * 100);
 
   return (
     <div className="space-y-6">
@@ -147,10 +146,9 @@ export default async function AdminHomePage() {
         />
         <Stat label="마지막 분석 성공" value={formatDateTime(s.lastAnalyzeAt)} />
         <Stat
-          label="이번 달 Actions 사용 (청구 추정)"
+          label="이번 달 Actions 실행 시간"
           value={`${s.monthMinutes}분`}
-          sub={`무료 한도 ${s.budgetMinutes}분의 ${budgetPct}% · 준비시간·올림 포함, CI 제외라 실제는 이보다 많을 수 있음`}
-          warn={s.monthMinutes >= s.warnMinutes}
+          sub="참고용 — 공개 저장소(robot-intel)는 실행 시간 한도가 없음. 갑자기 뛰면 배치 폭주 의심"
         />
         <Stat
           label="운영자가 숨긴 콘텐츠"
